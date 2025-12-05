@@ -27,9 +27,13 @@ import numpy as np
 import soundfile as sf
 import whisper
 
-VOSK_MODEL_PATH = r"c:\Users\HP\Desktop\synoptic\vosk-model-small-en-us-0.15"
-SAMPLE_RATE = 16000
-WHISPER_MODEL_NAME = "base.en" 
+import os
+
+VOSK_MODEL_PATH = os.environ.get("VOSK_MODEL_PATH", "models/vosk-model-small-en")
+SAMPLE_RATE = int(os.environ.get("SAMPLE_RATE", "16000"))
+WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL_NAME", "tiny.en")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
 MIN_PARTIAL_CHARS = 3       
 OVERLAP_RATIO = 0.7
 MAX_NGRAM_DEDUPE = 4
