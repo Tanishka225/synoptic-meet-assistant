@@ -1,11 +1,3 @@
-# main.py - Synoptic backend (copy-paste ready)
-# ----------------------------
-# Features:
-# - /meetings/live/start  -> create meeting
-# - /ws/meetings/{id}     -> receive raw PCM16LE frames -> Vosk partials (streaming)
-# - /meetings/{id}/end    -> write buffer -> Whisper final transcript -> summary + MoM
-# - deduplication of partials + repeated phrase cleanup
-# ----------------------------
 
 import os
 import json
@@ -25,22 +17,23 @@ from fastapi.responses import FileResponse
 from vosk import Model as VoskModel, KaldiRecognizer
 import numpy as np
 import soundfile as sf
-import whisper
+from faster_whisper import WhisperModel
 
-import os
+VOSK_MODEL_PATH = "./vosk-model-en-us-0.22" 
+SAMPLE_RATE = 16000
+WHISPER_MODEL_NAME = "small.en"
 
-VOSK_MODEL_PATH = os.environ.get("VOSK_MODEL_PATH", "models/vosk-model-small-en")
-SAMPLE_RATE = int(os.environ.get("SAMPLE_RATE", "16000"))
-WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL_NAME", "tiny.en")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-
-MIN_PARTIAL_CHARS = 3       
+WHISPER_MODEL = WhisperModel(
+    WHISPER_MODEL_NAME,
+    device="cpu",
+    compute_type="int8"
+)
+MIN_PARTIAL_CHARS = 8
 OVERLAP_RATIO = 0.7
 MAX_NGRAM_DEDUPE = 4
 app = FastAPI(title="Synoptic Backend")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ---------------- Data models ----------------
 class MeetingStatus(str, Enum):
     LIVE = "live"
     COMPLETED = "completed"
@@ -57,22 +50,27 @@ class Meeting:
     live_buffer: Optional[List[str]] = None
     error: Optional[str] = None
 
-# ---------------- In-memory stores ----------------
 MEETINGS: Dict[str, Meeting] = {}
-LIVE_AUDIO_BUFFERS: Dict[str, bytearray] = {}     # meeting_id -> raw PCM16LE bytes
-VOSK_RECOGNIZERS: Dict[str, KaldiRecognizer] = {} # meeting_id -> KaldiRecognizer
-LAST_PARTIALS: Dict[str, str] = {}                # meeting_id -> last partial sent (dedupe)
+LIVE_AUDIO_BUFFERS: Dict[str, bytearray] = {}
+VOSK_RECOGNIZERS: Dict[str, KaldiRecognizer] = {}
+LAST_PARTIALS: Dict[str, str] = {}
 
-# ---------------- Load models ----------------
-print("Loading Whisper model:", WHISPER_MODEL_NAME)
-WHISPER_MODEL = whisper.load_model(WHISPER_MODEL_NAME)
-print("Whisper loaded.")
+@app.on_event("startup")
+@app.on_event("startup")
+async def startup_event():
+    global VOSK_MODEL
 
-print("Loading Vosk model from:", VOSK_MODEL_PATH)
-VOSK_MODEL = VoskModel(VOSK_MODEL_PATH)
-print("Vosk loaded.")
+    print("[Startup] Loading Vosk model...")
+    VOSK_MODEL = VoskModel(VOSK_MODEL_PATH)
 
-# ---------------- Helpers ----------------
+    print("[Startup] Models loaded successfully.")
+
+GOOGLE_MEET_API_KEY = os.getenv("GOOGLE_MEET_API_KEY")
+GOOGLE_MEET_MEETING_ID = os.getenv("GOOGLE_MEET_MEETING_ID")
+
+def connect_google_meet():
+    
+    print(f"Connecting to Google Meet: {GOOGLE_MEET_MEETING_ID}")
 def create_meeting(title: str) -> Meeting:
     m_id = str(uuid.uuid4())
     meeting = Meeting(id=m_id, title=title, status=MeetingStatus.LIVE, live_buffer=[])
@@ -97,10 +95,6 @@ def write_buffer_to_wav(meeting_id: str, out_path: str) -> bool:
         return False
 
 def dedupe_repeated_phrases(text: str, max_ngram=MAX_NGRAM_DEDUPE) -> str:
-    """
-    Remove immediate repeated sequences (e.g., 'hello hello hello', 'we will we will').
-    Scans for repeated adjacent n-grams up to max_ngram length.
-    """
     if not text:
         return text
     words = re.findall(r'\S+', text)
@@ -124,16 +118,14 @@ def dedupe_repeated_phrases(text: str, max_ngram=MAX_NGRAM_DEDUPE) -> str:
     return " ".join(out)
 
 def simple_summary_and_mom(transcript: str):
-    """Fallback summarizer and MoM generator (replace with LLM/Gemini integration if desired)."""
-    if not transcript or transcript.strip() == "":
-        return ("", "")
+    if not transcript:
+        return "", ""
     sents = [s.strip() for s in re.split(r'[.?!]\s*', transcript) if s.strip()]
     summary = ""
     if len(sents) >= 2:
         summary = sents[0] + ". " + sents[1] + "."
     else:
         summary = sents[0] + "." if sents else transcript[:200]
-    # action item heuristic
     actions = []
     triggers = [" will ", " shall ", " should ", " to "]
     for s in sents:
@@ -152,10 +144,8 @@ def simple_summary_and_mom(transcript: str):
     return (summary, "\n".join(mom_lines))
 
 def summarize_and_create_mom(transcript: str):
-    # placeholder: integrate Gemini/LLM here for high-quality MoM
     return simple_summary_and_mom(transcript)
 
-# ---------------- API endpoints ----------------
 @app.post("/meetings/live/start")
 async def start_live_meeting(title: str = Form("Untitled Meeting")):
     meeting = create_meeting(title)
@@ -163,11 +153,7 @@ async def start_live_meeting(title: str = Form("Untitled Meeting")):
 
 @app.websocket("/ws/meetings/{meeting_id}")
 async def websocket_live_meeting(websocket: WebSocket, meeting_id: str):
-    """
-    Receive raw PCM16LE frames from browser.
-    Use Vosk for streaming partials. Deduplicate using LAST_PARTIALS.
-    Append all bytes to LIVE_AUDIO_BUFFERS for final Whisper transcription.
-    """
+
     if meeting_id not in MEETINGS:
         await websocket.close(code=4404)
         return
@@ -203,7 +189,11 @@ async def websocket_live_meeting(websocket: WebSocket, meeting_id: str):
                         # avoid sending identical final twice
                         last_sent = LAST_PARTIALS.get(meeting_id, "")
                         if text != last_sent:
-                            meeting.live_buffer.append(text)
+                            if (
+                                not meeting.live_buffer
+                                or meeting.live_buffer[-1] != text
+                            ):
+                                meeting.live_buffer.append(text)
                             MEETINGS[meeting_id] = meeting
                             await websocket.send_json({"type": "partial_transcript", "text": text, "final": True})
                             LAST_PARTIALS[meeting_id] = ""  # reset after final
@@ -247,13 +237,6 @@ async def websocket_live_meeting(websocket: WebSocket, meeting_id: str):
 
 @app.post("/meetings/{meeting_id}/end")
 def end_live_meeting(meeting_id: str):
-    """
-    On meeting end:
-    - write PCM buffer to WAV
-    - run Whisper final transcription
-    - dedupe repeated phrases
-    - generate summary & MoM
-    """
     meeting = MEETINGS.get(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
@@ -278,8 +261,16 @@ def end_live_meeting(meeting_id: str):
     # final transcription with Whisper
     try:
         print(f"[WHISPER] Transcribing {wav_path} ...")
-        result = WHISPER_MODEL.transcribe(wav_path, language="en", fp16=False)
-        transcript = (result.get("text") or "").strip()
+        segments, info = WHISPER_MODEL.transcribe(
+            wav_path,
+            language="en",
+            beam_size=5,
+            vad_filter=True
+        )
+
+        transcript = " ".join(
+            segment.text.strip() for segment in segments
+        )
         # cleanup repeated phrases
         transcript = dedupe_repeated_phrases(transcript, max_ngram=MAX_NGRAM_DEDUPE)
         meeting.transcript = transcript
@@ -321,15 +312,13 @@ def end_live_meeting(meeting_id: str):
 
 @app.post("/meetings")
 async def upload_offline_meeting(title: str = Form("Uploaded Recording"), audio: UploadFile = File(...)):
-    """
-    Upload an audio file; Whisper will transcribe and we generate summary+MoM.
-    """
     m = create_meeting(title)
     tmp_dir = tempfile.mkdtemp(prefix="synoptic_")
     try:
         upload_path = os.path.join(tmp_dir, audio.filename)
         with open(upload_path, "wb") as f:
-            f.write(await audio.read())
+            while chunk := await audio.read(1024 * 1024):
+                   f.write(chunk)
         try:
             result = WHISPER_MODEL.transcribe(upload_path, language="en", fp16=False)
             transcript = (result.get("text") or "").strip()
