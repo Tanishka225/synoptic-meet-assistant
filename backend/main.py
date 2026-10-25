@@ -175,18 +175,14 @@ async def websocket_live_meeting(websocket: WebSocket, meeting_id: str):
             if not data:
                 continue
 
-            # store bytes for final transcript
             LIVE_AUDIO_BUFFERS[meeting_id].extend(data)
 
-            # Feed data into Vosk recognizer
             try:
                 accepted = rec.AcceptWaveform(data)
                 if accepted:
-                    # finalized segment
                     res = json.loads(rec.Result())
                     text = res.get("text", "").strip()
                     if text:
-                        # avoid sending identical final twice
                         last_sent = LAST_PARTIALS.get(meeting_id, "")
                         if text != last_sent:
                             if (
@@ -203,17 +199,13 @@ async def websocket_live_meeting(websocket: WebSocket, meeting_id: str):
                     last = LAST_PARTIALS.get(meeting_id, "")
                     if not partial:
                         continue
-                    # ignore very short partials
                     if len(partial) < MIN_PARTIAL_CHARS:
                         continue
-                    # identical?
                     if partial == last:
                         continue
-                    # overlap heuristic: if new partial contains last or vice versa, require it to be sufficiently longer
                     if last and (last in partial or partial in last):
                         if len(partial) <= len(last) * OVERLAP_RATIO:
                             continue
-                    # send partial
                     await websocket.send_json({"type": "partial_transcript", "text": partial, "final": False})
                     LAST_PARTIALS[meeting_id] = partial
 
@@ -243,7 +235,6 @@ def end_live_meeting(meeting_id: str):
     if meeting.status != MeetingStatus.LIVE:
         raise HTTPException(status_code=400, detail="Meeting is not LIVE")
 
-    # write buffer to temp wav
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         wav_path = tmp.name
 
@@ -258,7 +249,6 @@ def end_live_meeting(meeting_id: str):
             pass
         return asdict(meeting)
 
-    # final transcription with Whisper
     try:
         print(f"[WHISPER] Transcribing {wav_path} ...")
         segments, info = WHISPER_MODEL.transcribe(
@@ -271,7 +261,6 @@ def end_live_meeting(meeting_id: str):
         transcript = " ".join(
             segment.text.strip() for segment in segments
         )
-        # cleanup repeated phrases
         transcript = dedupe_repeated_phrases(transcript, max_ngram=MAX_NGRAM_DEDUPE)
         meeting.transcript = transcript
     except Exception as e:
