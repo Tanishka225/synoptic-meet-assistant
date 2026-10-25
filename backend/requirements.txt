@@ -8,7 +8,7 @@ vosk
 soundfile
 numpy
 
-openai-whisper
+faster-whisper
+ctranslate2
 
-torch
-ffmpeg-python 
+ffmpeg-python
