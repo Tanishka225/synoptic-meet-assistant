@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Synoptic — Live Meeting Assistant</title>
 
-<!-- Styles: kept visually identical to your screenshot (dark two-column layout) -->
 <style>
   :root{
     --bg:#071323;
@@ -26,11 +25,9 @@
   h1{font-size:26px;margin:0 0 6px 0}
   .subtitle{color:var(--muted); font-size:14px;margin:0 0 18px 0}
 
-  /* Card style */
   .card{background:linear-gradient(180deg, rgba(6,17,26,0.6), rgba(4,9,14,0.6)); border-radius:12px; padding:18px; border:1px solid var(--card-border); box-shadow: 0 6px 18px rgba(0,0,0,0.45);}
   .small{color:var(--muted); font-size:13px;}
 
-  /* Left column (live) */
   .controls{display:flex;gap:10px;align-items:center;margin-top:8px;margin-bottom:10px;}
   input[type="text"]{width:100%; padding:10px;border-radius:8px;border:1px solid #122733;background:transparent;color:var(--muted); outline:none}
   button{padding:10px 14px;border-radius:10px;border:none;cursor:pointer;font-weight:600}
@@ -47,7 +44,6 @@
   textarea{width:100%; min-height:160px;border-radius:10px;padding:12px;background:transparent;border:1px solid #122733;color:#e6eef8;font-family:ui-monospace, SFMono-Regular, Menlo, monospace; line-height:1.4; resize:vertical}
   .two-col{display:grid; grid-template-columns: 1fr 1fr; gap:12px}
 
-  /* Right column */
   .muted-box{font-size:13px;color:var(--muted);margin-bottom:10px}
   .small-note{font-size:12px;color:#8aa1b5}
 
@@ -55,7 +51,6 @@
   .row{display:flex;gap:10px;align-items:center}
   .label-pill{background:rgba(255,255,255,0.02);padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,0.02);font-size:12px;color:var(--muted)}
 
-  /* responsive */
   @media(max-width:960px){
     .wrap{grid-template-columns: 1fr; padding:12px}
   }
@@ -68,7 +63,6 @@
       <p class="subtitle">Capture ongoing Google Meet audio, see a live transcript, and generate Minutes of Meeting (MoM) at the end.</p>
     </header>
 
-    <!-- LEFT: Live meeting card -->
     <div class="card">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div>
@@ -136,14 +130,6 @@
   </div>
 
 <script>
-/*
-  Frontend logic:
-  - Start -> POST /meetings/live/start -> create meeting ID
-  - Open ws://.../ws/meetings/{id} -> stream raw PCM16 (16kHz) via WebAudio ScriptProcessor
-  - Vosk returns partial transcripts -> append to liveTranscript
-  - End -> POST /meetings/{id}/end -> final Whisper transcription, summary + MoM -> populate UI
-  - Upload -> POST /meetings (form) -> offline processing
-*/
 
 const API_BASE = "http://127.0.0.1:8000";
 
@@ -169,7 +155,6 @@ let ws = null;
 let meetingId = null;
 let audioNodes = null;
 
-// convert float32 -> int16 LE
 function floatTo16BitPCM(float32Array){
   const l = float32Array.length;
   const buffer = new ArrayBuffer(l*2);
@@ -182,7 +167,6 @@ function floatTo16BitPCM(float32Array){
   return buffer;
 }
 
-// resample via OfflineAudioContext (small frames)
 async function resampleBuffer(inputBuffer, targetRate){
   const numChannels = inputBuffer.numberOfChannels;
   const targetLength = Math.round(inputBuffer.length * (targetRate / inputBuffer.sampleRate));
@@ -210,16 +194,12 @@ async function startStreamingPCM(ws){
 
   source.connect(processor);
 
-// don't send audio to speakers — use a zero-gain node if the browser requires a destination connection
 try {
-  // create a silent gain node and connect processor -> gain -> destination (no audible output)
   const silentGain = audioCtx.createGain();
   silentGain.gain.value = 0;
   processor.connect(silentGain);
   silentGain.connect(audioCtx.destination);
 } catch (e) {
-  // fallback: if that fails, just don't connect to destination at all
-  // some browsers may require connecting but usually it's fine without it
   console.warn("Silent gain connect failed; processor not connected to destination.", e);
 }
 
@@ -311,14 +291,10 @@ ws.onmessage = (ev) => {
       if (!text) return;
 
       if (isFinal) {
-        // final chunk — append and clear last partial buffer
         liveTranscript.value += (text + " ");
         lastClientPartial = "";
       } else {
-        // partial — only append if it differs from last
         if (text !== lastClientPartial) {
-          // replace the last partial in the textarea (if present)
-          // strategy: if lastClientPartial exists, remove it from the end, then append new partial
           if (lastClientPartial && liveTranscript.value.endsWith(lastClientPartial + " ")) {
             liveTranscript.value = liveTranscript.value.slice(0, - (lastClientPartial.length + 1));
           }
@@ -348,12 +324,10 @@ ws.onmessage = (ev) => {
   }
 };
 
-// End meeting handler
 endBtn.onclick = async () => {
   if (!meetingId) { alert("No meeting active"); return; }
   setStatus("ending...", "status-idle");
   try {
-    // stop streaming first
     stopStreamingPCM();
     if (ws && ws.readyState === WebSocket.OPEN) ws.close();
 
@@ -383,7 +357,6 @@ downloadMomBtn.onclick = () => {
   window.open(`${API_BASE}/meetings/${meetingId}/mom/download`, "_blank");
 };
 
-// upload handler
 uploadBtn.onclick = async () => {
   const file = uploadFile.files[0];
   if (!file){
@@ -403,7 +376,6 @@ uploadBtn.onclick = async () => {
   } catch(err){ console.error("Upload error", err); alert("Upload failed"); }
 };
 
-// meetings list
 async function refreshList(){
   meetingsList.innerHTML = "";
   try {
